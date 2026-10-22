@@ -3,6 +3,7 @@
 ## Unreleased
 
 ### Added
+- **GET /attesters/:address/stats** (#169): how an attester's confirmations have held up: `attestations`, `disputedAfterAttestation` (vouchers it attested that were later disputed, including disputes since resolved either way) and `medianSecondsFromClaim` (median time from claim to attestation, `null` before any timed attestation). 404 for an unknown attester. `openapi.json` regenerated with `npm run client:generate`, which also picks up routes added since it was last generated (`/stats/daily`, `/providers/{address}/stats`, `/vouchers/{id}/events`, `/attesters`, `/attesters/{address}`). Tests in `src/__tests__/routes.test.ts`.
 - **GET /providers/:address/stats**: A clinic's vouchers grouped by status, with the total settled value summed exactly (base-unit strings). 404 for an unknown provider.
 - **GET /stats/daily?days=30**: Funded, settled and refunded counts and value per UTC day (max 365). Days with no activity are returned as zeros, and amounts are summed with BigInt.
 - **Voucher.refundedAt** (nullable): set from the `voucher_refunded` event's ledger close time. `prisma db push` adds the column in place (no backfill needed).
