@@ -1252,6 +1252,113 @@ describe('GET /attesters/:address', () => {
   });
 });
 
+describe('GET /attesters/:address/stats', () => {
+  it('counts attestations, later disputes and the median wait from claim (#169)', async () => {
+    const claimed = new Date(Date.now() - 10 * DAY);
+    const after = (hours: number) => new Date(claimed.getTime() + hours * 3_600_000);
+    const fixture = {
+      funder: FUNDER,
+      beneficiaryRef: REF,
+      providerAddress: CLINIC,
+      serviceCode: 101,
+      amount: '10000000',
+      createdAt: new Date(claimed.getTime() - DAY),
+      expiresAt: new Date(Date.now() + 20 * DAY),
+      claimedAt: claimed,
+      attestedBy: ATTESTER,
+    };
+    await prisma.voucher.createMany({
+      data: [
+        // Disputed, then resolved for the provider and settled: still counts.
+        {
+          ...fixture,
+          id: 'a1',
+          status: 'Settled',
+          attestedAt: after(1),
+          disputeReason: 3,
+          disputeOutcome: 'Provider',
+        },
+        // Disputed and open.
+        { ...fixture, id: 'a2', status: 'Disputed', attestedAt: after(3), disputeReason: 1 },
+        // Settled without a dispute.
+        { ...fixture, id: 'a3', status: 'Settled', attestedAt: after(8) },
+        // Another attester's dispute does not count here.
+        {
+          ...fixture,
+          id: 'a4',
+          status: 'Disputed',
+          attestedAt: after(2),
+          attestedBy: FORMER_ATTESTER,
+          disputeReason: 1,
+        },
+      ],
+    });
+
+    const { status, body } = await get(`/attesters/${ATTESTER}/stats`);
+    expect(status).toBe(200);
+    // Voucher 4 from the shared seed has no claimedAt, so it counts as an
+    // attestation but not towards the median: waits are 1h, 3h and 8h.
+    expect(body).toEqual({
+      address: ATTESTER,
+      active: true,
+      attestations: 4,
+      disputedAfterAttestation: 2,
+      medianSecondsFromClaim: 3 * 3600,
+    });
+
+    const former = await get(`/attesters/${FORMER_ATTESTER}/stats`);
+    expect(former.body).toMatchObject({
+      active: false,
+      attestations: 1,
+      disputedAfterAttestation: 1,
+      medianSecondsFromClaim: 2 * 3600,
+    });
+  });
+
+  it('reports a null median before any timed attestation', async () => {
+    const { body } = await get(`/attesters/${FORMER_ATTESTER}/stats`);
+    expect(body).toEqual({
+      address: FORMER_ATTESTER,
+      active: false,
+      attestations: 0,
+      disputedAfterAttestation: 0,
+      medianSecondsFromClaim: null,
+    });
+  });
+
+  it('averages the two middle waits for an even count', async () => {
+    const claimed = new Date(Date.now() - 5 * DAY);
+    await prisma.voucher.update({
+      where: { id: '4' },
+      data: { claimedAt: claimed, attestedAt: new Date(claimed.getTime() + 2 * 3_600_000) },
+    });
+    await prisma.voucher.create({
+      data: {
+        id: 'a5',
+        funder: FUNDER,
+        beneficiaryRef: REF,
+        providerAddress: CLINIC,
+        serviceCode: 101,
+        amount: '10000000',
+        status: 'Attested',
+        createdAt: new Date(claimed.getTime() - DAY),
+        expiresAt: new Date(Date.now() + 20 * DAY),
+        claimedAt: claimed,
+        attestedAt: new Date(claimed.getTime() + 5 * 3_600_000),
+        attestedBy: ATTESTER,
+      },
+    });
+    const { body } = await get(`/attesters/${ATTESTER}/stats`);
+    expect(body.medianSecondsFromClaim).toBe(3.5 * 3600);
+  });
+
+  it('404s an unknown attester', async () => {
+    const { status, body } = await get(`/attesters/${FUNDER}/stats`);
+    expect(status).toBe(404);
+    expect(body.error).toBe('attester_not_found');
+  });
+});
+
 describe('GET /receipts', () => {
   it('returns care history and total spend for one beneficiary', async () => {
     const { body } = await get(`/receipts?beneficiaryRef=${REF}`);
