@@ -6,6 +6,7 @@ import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
 import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { ApiError } from '../lib/errors.js';
+import { applyFields, parseFields } from '../lib/fields.js';
 import { providerSummaries, type ProviderSummary } from '../lib/providers.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
 import { accountAddress } from '../lib/stellar-address.js';
@@ -21,6 +22,7 @@ const listQuery = z
     cursor: cursorParam,
     limit: limitParam,
     offset: z.coerce.number().int().min(0).default(0),
+    fields: z.string().max(512).optional(),
   })
   .refine((data) => Boolean(data.beneficiaryRef) !== Boolean(data.provider), {
     message: 'Provide exactly one of: beneficiaryRef, provider',
@@ -34,6 +36,23 @@ const voucherIdParam = z.object({
 const summaryQuery = z.object({
   beneficiaryRef: z.string().refine(isValidRef, 'must be 64 hex characters'),
 });
+
+/**
+ * Top-level keys the receipt list items emit: the allow-list for `?fields=`
+ * (#166). `beneficiaryRef` only exists on the patient view — a provider-view
+ * client asking for it simply gets nothing for it, never the value.
+ */
+const RECEIPT_FIELDS = [
+  'voucherId',
+  'providerAddress',
+  'provider',
+  'serviceCode',
+  'serviceLabel',
+  'amount',
+  'amountDisplay',
+  'settledAt',
+  'beneficiaryRef',
+] as const;
 
 export async function receiptRoutes(app: FastifyInstance): Promise<void> {
   /**
@@ -49,7 +68,11 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
     if (!parsed.success) {
       throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
     }
-    const { beneficiaryRef, provider, cursor, limit, offset } = parsed.data;
+    const { beneficiaryRef, provider, cursor, limit, offset, fields } = parsed.data;
+
+    const fieldSet = parseFields(fields, RECEIPT_FIELDS, 'GET /receipts');
+    const project = <T extends Record<string, unknown>>(rows: T[]): Partial<T>[] =>
+      fieldSet ? rows.map((r) => applyFields(r, fieldSet)) : rows;
 
     const baseWhere = beneficiaryRef
       ? { beneficiaryRef }
@@ -118,7 +141,7 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       ]);
       const last = page[page.length - 1];
       const nextCursor = hasNext && last ? encodeCursor(last.settledAt, last.voucherId) : null;
-      return { limit, nextCursor, receipts: page.map((r) => formatReceipt(r, labels, clinics)) };
+      return { limit, nextCursor, receipts: project(page.map((r) => formatReceipt(r, labels, clinics))) };
     }
 
     const [rows, total, spend] = await Promise.all([
@@ -154,7 +177,7 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       nextCursor,
       totalSpend,
       totalSpendDisplay: fromBaseUnits(totalSpend),
-      receipts: page.map((r) => formatReceipt(r, labels, clinics)),
+      receipts: project(page.map((r) => formatReceipt(r, labels, clinics))),
     };
   });
 
@@ -231,6 +254,44 @@ export async function receiptRoutes(app: FastifyInstance): Promise<void> {
       firstVisit,
       lastVisit,
       clinics: clinicList,
+    };
+  });
+
+  /**
+   * Proof for a receipt on chain.
+   *
+   * To prove a receipt on chain, a third party needs the transaction hash,
+   * ledger and event id, which the receipt route does not return.
+   *
+   * Acceptance criteria:
+   * - Proof fields returned: tx hash, ledger, event id and contract id
+   * - 404 when unknown
+   */
+  app.get('/receipts/:voucherId/proof', async (req) => {
+    const parsed = voucherIdParam.safeParse(req.params);
+    if (!parsed.success) {
+      throw new ApiError(400, 'invalid_query', 'Invalid query parameters', parsed.error.issues);
+    }
+    const { voucherId } = parsed.data;
+
+    const receipt = await prisma.receipt.findUnique({
+      where: { voucherId },
+    });
+    if (!receipt) throw new ApiError(404, 'receipt_not_found', 'Receipt not found');
+
+    const events = await prisma.contractEvent.findMany({
+      where: { voucherId },
+      orderBy: [{ ledger: 'asc' }, { id: 'asc' }],
+    });
+
+    if (events.length === 0) throw new ApiError(404, 'receipt_not_found', 'Receipt not found');
+
+    const proofEvent = events[events.length - 1];
+    return {
+      txHash: proofEvent!.txHash,
+      ledger: proofEvent!.ledger,
+      eventId: proofEvent!.id,
+      contractId: proofEvent!.contractId,
     };
   });
 

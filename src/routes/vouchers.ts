@@ -11,6 +11,7 @@ import { voucherSeq } from '../lib/voucher-seq.js';
 import { csvRow } from '../lib/csv.js';
 import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { ApiError } from '../lib/errors.js';
+import { applyFields, parseFields } from '../lib/fields.js';
 import { isRefundable, isSettleable, refundableAt } from '../lib/lifecycle.js';
 import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
@@ -23,6 +24,34 @@ const STATUSES = [
   'Settled',
   'Disputed',
   'Refunded',
+] as const;
+
+/** Top-level keys `serialise()` emits: the allow-list for `?fields=` (#166). */
+const VOUCHER_FIELDS = [
+  'id',
+  'funder',
+  'beneficiaryRef',
+  'provider',
+  'serviceCode',
+  'serviceLabel',
+  'amount',
+  'amountDisplay',
+  'status',
+  'createdAt',
+  'expiresAt',
+  'claimedAt',
+  'attestedAt',
+  'attestedBy',
+  'disputeDeadline',
+  'disputeReason',
+  'disputeResolvedAt',
+  'disputeResolvedBy',
+  'disputeOutcome',
+  'settledNet',
+  'settledFee',
+  'refundableAt',
+  'isSettleable',
+  'isRefundable',
 ] as const;
 
 /** Amounts are i128 base units carried as decimal strings. */
@@ -60,6 +89,7 @@ const listQuery = z.object({
   cursor: cursorParam,
   limit: limitParam,
   offset: z.coerce.number().int().min(0).default(0),
+  fields: z.string().max(512).optional(),
 })
   .refine(
     (q) => !q.createdFrom || !q.createdTo || Date.parse(q.createdFrom) <= Date.parse(q.createdTo),
@@ -156,7 +186,12 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
         cursor,
         limit,
         offset,
+        fields,
       } = parsed.data;
+
+      const fieldSet = parseFields(fields, VOUCHER_FIELDS, 'GET /vouchers');
+      const project = <T extends Record<string, unknown>>(rows: T[]): Partial<T>[] =>
+        fieldSet ? rows.map((r) => applyFields(r, fieldSet)) : rows;
 
       if (
         !funder &&
@@ -250,13 +285,13 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
         const labels = await serviceLabels(page);
         const last = page[page.length - 1];
         const nextCursor = hasNext && last ? encodeCursor(last.createdAt, last.id) : null;
-        return { limit, nextCursor, vouchers: page.map((v) => serialise(v, labels)) };
+        return { limit, nextCursor, vouchers: project(page.map((v) => serialise(v, labels))) };
       }
 
       const { rows, total } = await pageByWhere(where, sort, order, limit, offset);
 
       const labels = await serviceLabels(rows);
-      return { total, limit, offset, vouchers: rows.map((v) => serialise(v, labels)) };
+      return { total, limit, offset, vouchers: project(rows.map((v) => serialise(v, labels))) };
     },
   );
 
