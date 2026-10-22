@@ -2,7 +2,7 @@ import { createHash, createHmac } from 'node:crypto';
 
 import type { Prisma, PrismaClient } from '@prisma/client';
 
-import { voucherSeq } from '../lib/voucher_seq.js';
+import { voucherSeq } from '../lib/voucher-seq.js';
 
 /**
  * Deterministic local seed data (issue #59).
