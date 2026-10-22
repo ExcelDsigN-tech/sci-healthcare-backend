@@ -84,6 +84,14 @@ model Voucher {
   beneficiaryRef  String    // opaque 32-byte hex. Not reversible to an identity.
   serviceCode     Int
   amount          String    // i128 as decimal string
+  /// `amount` zero-padded to 39 digits (`amountKey()` in src/lib/amounts.ts),
+  /// so string order is numeric order and `GET /vouchers?sort=amount` and the
+  /// minAmount/maxAmount band run in the database instead of in memory
+  /// (issue #96). Filled from `amount` on every write through `prisma` in
+  /// src/db.ts; scripts with their own client set it themselves. Backfilled
+  /// by migration `20260110000000_voucher_amount_key`. Never exposed by an
+  /// API response.
+  amountKey       String    @default("")
   status          String    // Funded | Claimed | Attested | Settled | Disputed | Refunded
   createdAt       DateTime
   expiresAt       DateTime
@@ -138,6 +146,8 @@ model Voucher {
   // GET /vouchers?status=... (single or comma-separated) and the
   // `status: 'Settled'` scan behind GET /stats, each sorted by createdAt.
   @@index([status, createdAt])
+  // GET /vouchers?...&sort=amount and the minAmount/maxAmount band (#96).
+  @@index([amountKey])
   @@index([expiresAt])
   @@index([createdAt])
   @@index([refundedAt])

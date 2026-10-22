@@ -5,7 +5,7 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 
 import { prisma } from '../db.js';
-import { fromBaseUnits } from '../lib/amounts.js';
+import { AMOUNT_KEY_WIDTH, amountKey, fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
 import { voucherSeq } from '../lib/voucher-seq.js';
 import { csvRow } from '../lib/csv.js';
@@ -188,10 +188,15 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
               },
             }
           : {}),
+        ...(minAmount || maxAmount
+          ? {
+              amountKey: {
+                ...(minAmount ? { gte: amountBound(minAmount) } : {}),
+                ...(maxAmount ? { lte: amountBound(maxAmount) } : {}),
+              },
+            }
+          : {}),
       };
-
-      const min = minAmount === undefined ? null : BigInt(minAmount);
-      const max = maxAmount === undefined ? null : BigInt(maxAmount);
 
       if (cursor) {
         const decoded = decodeCursor(cursor);
@@ -234,25 +239,12 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
                 { createdAt: at, seq: null },
               ];
         const cursorWhere: Prisma.VoucherWhereInput = { ...where, OR: afterCursor };
-        const rows =
-          min === null && max === null
-            ? await prisma.voucher.findMany({
-                where: cursorWhere,
-                include: { provider: true },
-                orderBy: [{ createdAt: 'desc' }, ...idOrder('desc')],
-                take: limit + 1,
-              })
-            : (
-                await pageByAmount(
-                  cursorWhere,
-                  min,
-                  max,
-                  'createdAt',
-                  'desc',
-                  limit + 1,
-                  0,
-                )
-              ).rows;
+        const rows = await prisma.voucher.findMany({
+          where: cursorWhere,
+          include: { provider: true },
+          orderBy: [{ createdAt: 'desc' }, ...idOrder('desc')],
+          take: limit + 1,
+        });
         const hasNext = rows.length > limit;
         const page = hasNext ? rows.slice(0, limit) : rows;
         const labels = await serviceLabels(page);
@@ -261,10 +253,7 @@ export async function voucherRoutes(app: FastifyInstance): Promise<void> {
         return { limit, nextCursor, vouchers: page.map((v) => serialise(v, labels)) };
       }
 
-      const { rows, total } =
-        min === null && max === null && sort !== 'amount'
-          ? await pageByWhere(where, sort, order, limit, offset)
-          : await pageByAmount(where, min, max, sort, order, limit, offset);
+      const { rows, total } = await pageByWhere(where, sort, order, limit, offset);
 
       const labels = await serviceLabels(rows);
       return { total, limit, offset, vouchers: rows.map((v) => serialise(v, labels)) };
@@ -469,15 +458,24 @@ async function* voucherCsv(where: Prisma.VoucherWhereInput): AsyncGenerator<stri
   }
 }
 
-/** The common path: filter, count and page entirely in the database. */
+/**
+ * Filter, count and page entirely in the database. Amount sorts and bands use
+ * `amountKey`, the zero-padded amount, whose string order is numeric order
+ * (#96): `amount` itself is an i128 string, and "9" sorts after "10".
+ */
 async function pageByWhere(
   where: Prisma.VoucherWhereInput,
-  sort: 'createdAt' | 'expiresAt',
+  sort: 'createdAt' | 'expiresAt' | 'amount',
   order: 'asc' | 'desc',
   limit: number,
   offset: number,
 ): Promise<{ rows: Row[]; total: number }> {
-  const primary = sort === 'createdAt' ? { createdAt: order } : { expiresAt: order };
+  const primary =
+    sort === 'createdAt'
+      ? { createdAt: order }
+      : sort === 'expiresAt'
+        ? { expiresAt: order }
+        : { amountKey: order };
   const [rows, total] = await Promise.all([
     prisma.voucher.findMany({
       where,
@@ -494,46 +492,16 @@ async function pageByWhere(
 }
 
 /**
- * Amounts are i128 carried as strings, so the database cannot compare them
- * numerically — string ordering puts "9" after "10". Compare with BigInt
- * instead, then fetch only the requested page.
+ * A minAmount/maxAmount bound as an `amountKey`. A bound wider than any i128
+ * is clamped to all nines, which is above every stored key: as a minimum it
+ * matches nothing and as a maximum it matches everything, as it would
+ * numerically. Leading zeros are dropped first so `007` means 7.
  */
-async function pageByAmount(
-  where: Prisma.VoucherWhereInput,
-  min: bigint | null,
-  max: bigint | null,
-  sort: 'createdAt' | 'expiresAt' | 'amount',
-  order: 'asc' | 'desc',
-  limit: number,
-  offset: number,
-): Promise<{ rows: Row[]; total: number }> {
-  const candidates = await prisma.voucher.findMany({
-    where,
-    orderBy:
-      sort === 'amount'
-        ? { createdAt: 'desc' }
-        : [
-            sort === 'createdAt' ? { createdAt: order } : { expiresAt: order },
-            ...idOrder(order),
-          ],
-    select: { id: true, amount: true },
-  });
-
-  const matching = candidates.filter((c) => {
-    const amount = BigInt(c.amount);
-    return (min === null || amount >= min) && (max === null || amount <= max);
-  });
-  if (sort === 'amount') matching.sort((a, b) => compareAmount(a, b, order));
-
-  const ids = matching.slice(offset, offset + limit).map((c) => c.id);
-  if (ids.length === 0) return { rows: [], total: matching.length };
-
-  const rows = await prisma.voucher.findMany({
-    where: { id: { in: ids } },
-    include: { provider: true },
-  });
-  const byId = new Map(rows.map((r) => [r.id, r]));
-  return { rows: ids.map((id) => byId.get(id)!), total: matching.length };
+function amountBound(base: string): string {
+  const canonical = BigInt(base).toString();
+  return canonical.length > AMOUNT_KEY_WIDTH
+    ? '9'.repeat(AMOUNT_KEY_WIDTH)
+    : amountKey(canonical);
 }
 
 function parseWithin(within: string, now: number): number {
@@ -551,19 +519,6 @@ function parseWithin(within: string, now: number): number {
     default:
       return now;
   }
-}
-
-function compareAmount(
-  a: { id: string; amount: string },
-  b: { id: string; amount: string },
-  order: 'asc' | 'desc',
-): number {
-  const av = BigInt(a.amount);
-  const bv = BigInt(b.amount);
-  const sign = order === 'asc' ? 1 : -1;
-  if (av !== bv) return av < bv ? -sign : sign;
-  if (a.id === b.id) return 0;
-  return a.id < b.id ? -sign : sign;
 }
 
 type Row = {
