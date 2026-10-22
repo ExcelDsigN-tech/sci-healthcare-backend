@@ -7,7 +7,7 @@ import { z } from 'zod';
 import { prisma } from '../db.js';
 import { fromBaseUnits } from '../lib/amounts.js';
 import { isValidRef } from '../lib/beneficiary.js';
-import { voucherSeq } from '../lib/voucher_seq.js';
+import { voucherSeq } from '../lib/voucher-seq.js';
 import { csvRow } from '../lib/csv.js';
 import { cursorParam, decodeCursor, encodeCursor, limitParam } from '../lib/cursor.js';
 import { ApiError } from '../lib/errors.js';
