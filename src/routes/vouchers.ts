@@ -14,6 +14,7 @@ import { ApiError } from '../lib/errors.js';
 import { isRefundable, isSettleable, refundableAt } from '../lib/lifecycle.js';
 import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
 import { serviceKey, serviceLabels } from '../lib/services.js';
+import { accountAddress } from '../lib/stellar-address.js';
 
 const STATUSES = [
   'Funded',
@@ -34,8 +35,8 @@ const statusList = z
   .pipe(z.array(z.enum(STATUSES)).min(1));
 
 const listQuery = z.object({
-  funder: z.string().length(56).optional(),
-  provider: z.string().length(56).optional(),
+  funder: accountAddress.optional(),
+  provider: accountAddress.optional(),
   beneficiaryRef: z
     .string()
     .max(64)
@@ -71,8 +72,8 @@ const listQuery = z.object({
 
 /** The CSV export takes the filters but none of the paging or sort options. */
 const csvQuery = z.object({
-  funder: z.string().length(56).optional(),
-  provider: z.string().length(56).optional(),
+  funder: accountAddress.optional(),
+  provider: accountAddress.optional(),
   beneficiaryRef: z
     .string()
     .max(64)
@@ -124,8 +125,8 @@ function idOrder(order: 'asc' | 'desc'): Prisma.VoucherOrderByWithRelationInput[
 }
 
 const dueQuery = z.object({
-  funder: z.string().length(56).optional(),
-  provider: z.string().length(56).optional(),
+  funder: accountAddress.optional(),
+  provider: accountAddress.optional(),
   within: z
     .string()
     .max(16)

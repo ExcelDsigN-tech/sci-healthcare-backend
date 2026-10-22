@@ -11,7 +11,7 @@ import { LIST_ROUTE_RATE_LIMIT } from '../lib/rate-limits.js';
 import { server } from '../stellar/client.js';
 
 const CLINIC = 'GDOOCNK2HL6TB2Y7FDYNNMG4GTM2PNPY4XCTWG2INFPYYVA66FCPZKBK';
-const SECOND_CLINIC = 'GCMDQZBBTZBR3ZDPCEFSDNNWVQFA44VHOJHR2JZTL7CHJHZ3N2LQDW3B';
+const SECOND_CLINIC = 'GDRHSGBLCHN4DNXQMIHWR3XJH4JM4ZNEIZGURNG42KSQVYULDW3PQH3I';
 const PENDING_CLINIC = 'GBWBYKGC5OCRELVP5WHAKEMBSZMNUY3HOKVSYBQGLFNWWQHNH2SD53FZ';
 /** An address that appears on a receipt but never registered (`#51`). */
 const UNREGISTERED_CLINIC = `G${'U'.repeat(55)}`;
@@ -1080,7 +1080,7 @@ describe('GET /vouchers.csv', () => {
   });
 
   it('escapes commas, quotes and line breaks in cells', async () => {
-    const tricky = 'G'.repeat(56);
+    const tricky = 'GD456OLJUTPFVB7GK5TQJ7MQZ3LRGAEL74VIH6BLVE4TATDASHO3SSUO';
     await prisma.provider.create({
       data: {
         address: tricky,
@@ -1980,6 +1980,31 @@ describe('HTTP caching', () => {
   it('does not serve 304 without a matching validator', async () => {
     const res = await cached('/providers', { 'if-none-match': 'W/"123-not-ours"' });
     expect(res.statusCode).toBe(200);
+  });
+});
+
+describe('Stellar address validation (#171)', () => {
+  // FUNDER with its last character changed: still 56 base32 characters,
+  // but the strkey checksum no longer matches.
+  const corrupted = FUNDER.slice(0, -1) + (FUNDER.endsWith('A') ? 'B' : 'A');
+
+  it('rejects an address with a bad checksum on every filter that takes one', async () => {
+    for (const url of [
+      `/vouchers?funder=${corrupted}`,
+      `/vouchers?provider=${corrupted}`,
+      `/vouchers/due?funder=${corrupted}&within=72h`,
+      `/receipts?provider=${corrupted}`,
+    ]) {
+      const { status, body } = await get(url);
+      expect(status, url).toBe(400);
+      expect(body.error, url).toBe('invalid_query');
+      expect(JSON.stringify(body.details), url).toContain('must be a valid Stellar account address');
+    }
+    expect((await getCsv(`/vouchers.csv?funder=${corrupted}`)).status).toBe(400);
+  });
+
+  it('still accepts a valid address', async () => {
+    expect((await get(`/vouchers?funder=${FUNDER}`)).status).toBe(200);
   });
 });
 
