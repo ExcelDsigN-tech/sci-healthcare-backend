@@ -1034,6 +1034,64 @@ describe('GET /vouchers sort', () => {
     expect(body.total).toBe(5);
   });
 
+  it('sorts and bands amounts across the whole i128 range (#96)', async () => {
+    const now = Date.now();
+    const huge = '170141183460469231731687303715884105727';
+    await prisma.voucher.create({
+      data: {
+        id: 'huge',
+        funder: FUNDER,
+        beneficiaryRef: REF,
+        providerAddress: CLINIC,
+        serviceCode: 101,
+        amount: huge,
+        status: 'Funded',
+        createdAt: new Date(now - DAY),
+        expiresAt: new Date(now + 10 * DAY),
+      },
+    });
+    // Every write through the shared client fills the sortable key.
+    const row = await prisma.voucher.findUnique({ where: { id: 'huge' } });
+    expect(row?.amountKey).toBe(huge);
+
+    const desc = await get(`/vouchers?funder=${FUNDER}&sort=amount&order=desc&limit=2`);
+    expect(desc.body.total).toBe(6);
+    expect(desc.body.vouchers.map((v: { id: string }) => v.id)).toEqual(['huge', '3']);
+
+    const top = await get(`/vouchers?funder=${FUNDER}&minAmount=${huge}`);
+    expect(top.body.vouchers.map((v: { id: string }) => v.id)).toEqual(['huge']);
+
+    // Leading zeros are the same number.
+    const padded = await get(`/vouchers?funder=${FUNDER}&minAmount=00050000000`);
+    expect(padded.body.vouchers.map((v: { id: string }) => v.id)).toEqual(['huge', '3']);
+
+    // A bound wider than any i128 compares as a number would.
+    const wide = '1' + '0'.repeat(40);
+    expect((await get(`/vouchers?funder=${FUNDER}&minAmount=${wide}`)).body.total).toBe(0);
+    expect((await get(`/vouchers?funder=${FUNDER}&maxAmount=${wide}`)).body.total).toBe(6);
+  });
+
+  it('orders by the stored amount key, in the database (#96)', async () => {
+    // Plant a key out of step with its amount. Only a database sort on
+    // `amountKey` puts voucher 2 (the cheapest) first; an in-memory sort on
+    // `amount` would not.
+    await prisma.voucher.updateMany({ where: { id: '2' }, data: { amountKey: '9'.repeat(39) } });
+    const { body } = await get(`/vouchers?funder=${FUNDER}&sort=amount&order=desc&limit=1`);
+    expect(body.vouchers.map((v: { id: string }) => v.id)).toEqual(['2']);
+    expect(body.total).toBe(5);
+  });
+
+  it('keeps an amount band on the cursor walk', async () => {
+    const { body: page1 } = await get(`/vouchers?funder=${FUNDER}&minAmount=30000000&limit=2`);
+    expect(page1.vouchers.map((v: { id: string }) => v.id)).toEqual(['5', '4']);
+    const cursor = encodeCursor(new Date(page1.vouchers[1].createdAt), page1.vouchers[1].id);
+    const { body: page2 } = await get(
+      `/vouchers?funder=${FUNDER}&minAmount=30000000&limit=2&cursor=${cursor}`,
+    );
+    expect(page2.vouchers.map((v: { id: string }) => v.id)).toEqual(['1', '3']);
+    expect(page2.nextCursor).toBeNull();
+  });
+
   it('rejects an unknown sort or order', async () => {
     expect((await get(`/vouchers?funder=${FUNDER}&sort=price`)).status).toBe(400);
     expect((await get(`/vouchers?funder=${FUNDER}&order=up`)).status).toBe(400);
